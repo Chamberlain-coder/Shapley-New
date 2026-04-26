@@ -29,7 +29,7 @@ import json
 import os
 import argparse
 from tqdm import tqdm
-from collections import defaultdict, Counter
+from collections import defaultdict
 from typing import Dict, List, Tuple, Optional, Any
 import logging
 import gc
@@ -720,7 +720,9 @@ def analyze_all_in_one(
     logger.info("=" * 70)
 
     # Statistics data structures
-    shapley_layers = defaultdict(Counter)
+    shapley_layers = defaultdict(
+        lambda: defaultdict(lambda: {"count": 0, "gating_score_sum": 0.0})
+    )
     gating_stats = defaultdict(lambda: defaultdict(lambda: {'sum': 0.0, 'count': 0}))
     
     # EASYEP: score = weight × (1 - simibr) × norm
@@ -796,10 +798,22 @@ def analyze_all_in_one(
                 k = indices_tensor.shape[-1]
 
                 # ==================== 1. Shapley statistics ====================
-                for row in indices_tensor:
+                for token_idx, row in enumerate(indices_tensor):
                     combo = tuple(sorted(row.tolist()))
                     combo_str = str(combo)
-                    shapley_layers[layer_idx][combo_str] += 1
+                    combo_stats = shapley_layers[layer_idx][combo_str]
+                    combo_stats["count"] += 1
+
+                    if (
+                        gating_tensor.dim() == 2
+                        and token_idx < gating_tensor.shape[0]
+                    ):
+                        selected_scores = gating_tensor[token_idx, row.long()]
+                        combo_score_sum = float(selected_scores.sum().item())
+                    else:
+                        combo_score_sum = float(weights_tensor[token_idx].sum().item())
+
+                    combo_stats["gating_score_sum"] += combo_score_sum
 
                 # ==================== 2. Gating Score statistics ====================
                 if gating_tensor.dim() == 2:
@@ -863,8 +877,19 @@ def analyze_all_in_one(
         "total_layers": len(shapley_layers),
         "layers": {},
     }
-    for layer_idx, counter in shapley_layers.items():
-        shapley_data["layers"][str(layer_idx)] = dict(counter)
+    for layer_idx, combo_stats in shapley_layers.items():
+        layer_data = {}
+        for combo_str, stats in combo_stats.items():
+            count = int(stats["count"])
+            gating_score_sum = float(stats["gating_score_sum"])
+            layer_data[combo_str] = {
+                "count": count,
+                "gating_score_sum": gating_score_sum,
+                "avg_gating_score": (
+                    gating_score_sum / count if count > 0 else 0.0
+                ),
+            }
+        shapley_data["layers"][str(layer_idx)] = layer_data
     
     with open(shapley_file, "w", encoding="utf-8") as f:
         json.dump(shapley_data, f, indent=2, ensure_ascii=False)

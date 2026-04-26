@@ -2,7 +2,7 @@ import pandas as pd
 import json
 import argparse
 import os
-from typing import Dict, Tuple, List, Set
+from typing import Any, Dict, Tuple, List, Set
 import math
 
 # ------------------------------------------------------------
@@ -19,53 +19,79 @@ for i in range(K):
 phi_N = numerator / denominator * 10000
 
 
-def parse_data(raw_data: Dict[str, int]) -> Dict[Tuple[int, ...], int]:
-    parsed_data = {}
-    for key_str, freq in raw_data.items():
+def parse_data(raw_data: Dict[str, Any]) -> Dict[Tuple[int, ...], Dict[str, float]]:
+    parsed_data: Dict[Tuple[int, ...], Dict[str, float]] = {}
+    for key_str, stats in raw_data.items():
         try:
             clean_key = key_str.strip('()')
             if not clean_key:
                 continue
             ids = sorted([int(x.strip()) for x in clean_key.split(',')])
-            parsed_data[tuple(ids)] = freq
+
+            if isinstance(stats, dict):
+                activation_count = int(stats.get("count", 0))
+                coalition_value = float(
+                    stats.get(
+                        "gating_score_sum",
+                        stats.get("value", activation_count),
+                    )
+                )
+            else:
+                activation_count = int(stats)
+                coalition_value = float(stats)
+
+            avg_gating_score = (
+                coalition_value / activation_count if activation_count > 0 else 0.0
+            )
+            parsed_data[tuple(ids)] = {
+                "count": activation_count,
+                "value": coalition_value,
+                "avg_gating_score": avg_gating_score,
+            }
         except ValueError:
             print(f"Warning: Skipping invalid key format: {key_str}")
             continue
     return parsed_data
 
 
-def calculate_shapley_k(data: Dict[Tuple[int, ...], int]) -> Tuple[Dict[int, float], Dict[Tuple[int, int, int], int]]:
+def calculate_shapley_k(
+    data: Dict[Tuple[int, ...], Dict[str, float]]
+) -> Tuple[Dict[int, float], Dict[Tuple[int, ...], float]]:
     if not data:
         return {}, {}
-        
-    sub_coalition_frequencies: Dict[Tuple[int, ...], int] = {}
+
+    sub_coalition_values: Dict[Tuple[int, ...], float] = {}
     all_experts: Set[int] = set()
 
-    for coalition, freq in data.items():
+    for coalition, stats in data.items():
         all_experts.update(coalition)
+        coalition_value = float(stats["value"])
         coalition_list = list(coalition)
         for i in range(len(coalition_list)):
             sub_coalition = tuple(coalition_list[:i] + coalition_list[i+1:])
-            sub_coalition_frequencies[sub_coalition] = sub_coalition_frequencies.get(sub_coalition, 0) + freq
+            sub_coalition_values[sub_coalition] = (
+                sub_coalition_values.get(sub_coalition, 0.0) + coalition_value
+            )
 
     all_experts_list = sorted(list(all_experts))
     shapley_values: Dict[int, float] = {}
 
     for e_i in all_experts_list:
-        expert_combinations: List[Tuple[Tuple[int, ...], int, int]] = [] # [(A_j, v_Aj, N_i,j)]
+        expert_combinations: List[Tuple[Tuple[int, ...], float, float]] = []
         min_ratio = float('inf')
 
-        for coalition, v_aj in data.items():
+        for coalition, stats in data.items():
             if e_i in coalition:
+                v_aj = float(stats["value"])
                 sub_coalition = tuple(sorted([e for e in coalition if e != e_i]))
-                
-                n_ij = sub_coalition_frequencies.get(sub_coalition, 0)
-                
+
+                n_ij = sub_coalition_values.get(sub_coalition, 0.0)
+
                 if n_ij == 0:
                     continue
-                
+
                 expert_combinations.append((coalition, v_aj, n_ij))
-                
+
                 ratio = v_aj / n_ij
                 if ratio < min_ratio:
                     min_ratio = ratio
@@ -82,9 +108,9 @@ def calculate_shapley_k(data: Dict[Tuple[int, ...], int]) -> Tuple[Dict[int, flo
         
         shapley_values[e_i] = phi_ei
 
-    return shapley_values, sub_coalition_frequencies
+    return shapley_values, sub_coalition_values
 
-def process_layer(layer_idx: str, raw_data: Dict[str, int]):
+def process_layer(layer_idx: str, raw_data: Dict[str, Any]):
     print(f"\nProcessing Layer {layer_idx} ...")
     
     parsed_data = parse_data(raw_data)
@@ -109,15 +135,21 @@ def process_layer(layer_idx: str, raw_data: Dict[str, int]):
     results_list = []
     for expert_id, phi_value in shapley_results.items():
         total_activations = 0
-        
-        for coalition, v_aj in parsed_data.items():
+        total_gating_score = 0.0
+
+        for coalition, stats in parsed_data.items():
             if expert_id in coalition:
-                total_activations += v_aj
+                total_activations += int(stats["count"])
+                total_gating_score += float(stats["value"])
 
         results_list.append({
             'Layer': layer_idx,
             'Expert_ID': expert_id,
             'Total_Activations': total_activations,
+            'Total_Gating_Score': total_gating_score,
+            'Avg_Gating_Score': (
+                total_gating_score / total_activations if total_activations > 0 else 0.0
+            ),
             'Shapley_Value': phi_value
         })
 
