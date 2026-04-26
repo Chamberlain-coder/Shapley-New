@@ -721,7 +721,7 @@ def analyze_all_in_one(
 
     # Statistics data structures
     shapley_layers = defaultdict(
-        lambda: defaultdict(lambda: {"count": 0, "gating_score_sum": 0.0})
+        lambda: defaultdict(lambda: {"count": 0, "gating_score": None})
     )
     gating_stats = defaultdict(lambda: defaultdict(lambda: {'sum': 0.0, 'count': 0}))
     
@@ -799,21 +799,33 @@ def analyze_all_in_one(
 
                 # ==================== 1. Shapley statistics ====================
                 for token_idx, row in enumerate(indices_tensor):
-                    combo = tuple(sorted(row.tolist()))
-                    combo_str = str(combo)
-                    combo_stats = shapley_layers[layer_idx][combo_str]
-                    combo_stats["count"] += 1
+                    raw_experts = [int(expert_id) for expert_id in row.tolist()]
 
                     if (
                         gating_tensor.dim() == 2
                         and token_idx < gating_tensor.shape[0]
                     ):
-                        selected_scores = gating_tensor[token_idx, row.long()]
-                        combo_score_sum = float(selected_scores.sum().item())
+                        raw_scores = [
+                            float(gating_tensor[token_idx, expert_id].item())
+                            for expert_id in raw_experts
+                        ]
                     else:
-                        combo_score_sum = float(weights_tensor[token_idx].sum().item())
+                        raw_scores = [
+                            float(score)
+                            for score in weights_tensor[token_idx].tolist()
+                        ]
 
-                    combo_stats["gating_score_sum"] += combo_score_sum
+                    sorted_pairs = sorted(zip(raw_experts, raw_scores), key=lambda x: x[0])
+                    combo = tuple(expert_id for expert_id, _ in sorted_pairs)
+                    combo_str = str(combo)
+                    combo_stats = shapley_layers[layer_idx][combo_str]
+                    combo_stats["count"] += 1
+
+                    if combo_stats["gating_score"] is None:
+                        combo_stats["gating_score"] = [0.0] * len(sorted_pairs)
+
+                    for score_idx, (_, score) in enumerate(sorted_pairs):
+                        combo_stats["gating_score"][score_idx] += score
 
                 # ==================== 2. Gating Score statistics ====================
                 if gating_tensor.dim() == 2:
@@ -881,12 +893,13 @@ def analyze_all_in_one(
         layer_data = {}
         for combo_str, stats in combo_stats.items():
             count = int(stats["count"])
-            gating_score_sum = float(stats["gating_score_sum"])
+            gating_score = [float(score) for score in (stats["gating_score"] or [])]
             layer_data[combo_str] = {
                 "count": count,
-                "gating_score_sum": gating_score_sum,
+                "gating_score": gating_score,
+                "gating_score_sum": float(sum(gating_score)),
                 "avg_gating_score": (
-                    gating_score_sum / count if count > 0 else 0.0
+                    float(sum(gating_score)) / count if count > 0 else 0.0
                 ),
             }
         shapley_data["layers"][str(layer_idx)] = layer_data

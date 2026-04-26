@@ -19,8 +19,8 @@ for i in range(K):
 phi_N = numerator / denominator * 10000
 
 
-def parse_data(raw_data: Dict[str, Any]) -> Dict[Tuple[int, ...], Dict[str, float]]:
-    parsed_data: Dict[Tuple[int, ...], Dict[str, float]] = {}
+def parse_data(raw_data: Dict[str, Any]) -> Dict[Tuple[int, ...], Dict[str, Any]]:
+    parsed_data: Dict[Tuple[int, ...], Dict[str, Any]] = {}
     for key_str, stats in raw_data.items():
         try:
             clean_key = key_str.strip('()')
@@ -30,15 +30,28 @@ def parse_data(raw_data: Dict[str, Any]) -> Dict[Tuple[int, ...], Dict[str, floa
 
             if isinstance(stats, dict):
                 activation_count = int(stats.get("count", 0))
-                coalition_value = float(
-                    stats.get(
-                        "gating_score_sum",
-                        stats.get("value", activation_count),
+                gating_scores = stats.get("gating_score")
+                expert_scores: Dict[int, float] = {}
+
+                if isinstance(gating_scores, (list, tuple)):
+                    gating_scores = [float(score) for score in gating_scores]
+                    coalition_value = float(sum(gating_scores))
+                    expert_scores = {
+                        expert_id: score
+                        for expert_id, score in zip(ids, gating_scores)
+                    }
+                else:
+                    coalition_value = float(
+                        stats.get(
+                            "gating_score_sum",
+                            stats.get("value", activation_count),
+                        )
                     )
-                )
             else:
                 activation_count = int(stats)
                 coalition_value = float(stats)
+                gating_scores = None
+                expert_scores = {}
 
             avg_gating_score = (
                 coalition_value / activation_count if activation_count > 0 else 0.0
@@ -47,6 +60,8 @@ def parse_data(raw_data: Dict[str, Any]) -> Dict[Tuple[int, ...], Dict[str, floa
                 "count": activation_count,
                 "value": coalition_value,
                 "avg_gating_score": avg_gating_score,
+                "gating_score": list(gating_scores) if gating_scores is not None else None,
+                "expert_scores": expert_scores,
             }
         except ValueError:
             print(f"Warning: Skipping invalid key format: {key_str}")
@@ -55,7 +70,7 @@ def parse_data(raw_data: Dict[str, Any]) -> Dict[Tuple[int, ...], Dict[str, floa
 
 
 def calculate_shapley_k(
-    data: Dict[Tuple[int, ...], Dict[str, float]]
+    data: Dict[Tuple[int, ...], Dict[str, Any]]
 ) -> Tuple[Dict[int, float], Dict[Tuple[int, ...], float]]:
     if not data:
         return {}, {}
@@ -66,11 +81,16 @@ def calculate_shapley_k(
     for coalition, stats in data.items():
         all_experts.update(coalition)
         coalition_value = float(stats["value"])
+        expert_scores = stats.get("expert_scores", {})
         coalition_list = list(coalition)
-        for i in range(len(coalition_list)):
-            sub_coalition = tuple(coalition_list[:i] + coalition_list[i+1:])
+        for removed_expert in coalition_list:
+            sub_coalition = tuple(e for e in coalition_list if e != removed_expert)
+            if expert_scores and removed_expert in expert_scores:
+                remaining_value = coalition_value - float(expert_scores[removed_expert])
+            else:
+                remaining_value = coalition_value
             sub_coalition_values[sub_coalition] = (
-                sub_coalition_values.get(sub_coalition, 0.0) + coalition_value
+                sub_coalition_values.get(sub_coalition, 0.0) + remaining_value
             )
 
     all_experts_list = sorted(list(all_experts))
@@ -82,7 +102,11 @@ def calculate_shapley_k(
 
         for coalition, stats in data.items():
             if e_i in coalition:
-                v_aj = float(stats["value"])
+                expert_scores = stats.get("expert_scores", {})
+                if expert_scores and e_i in expert_scores:
+                    v_aj = float(expert_scores[e_i])
+                else:
+                    v_aj = float(stats["value"])
                 sub_coalition = tuple(sorted([e for e in coalition if e != e_i]))
 
                 n_ij = sub_coalition_values.get(sub_coalition, 0.0)
@@ -140,7 +164,11 @@ def process_layer(layer_idx: str, raw_data: Dict[str, Any]):
         for coalition, stats in parsed_data.items():
             if expert_id in coalition:
                 total_activations += int(stats["count"])
-                total_gating_score += float(stats["value"])
+                expert_scores = stats.get("expert_scores", {})
+                if expert_scores and expert_id in expert_scores:
+                    total_gating_score += float(expert_scores[expert_id])
+                else:
+                    total_gating_score += float(stats["value"])
 
         results_list.append({
             'Layer': layer_idx,
